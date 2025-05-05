@@ -15,13 +15,13 @@ Create a file named `sample.json` in the project directory with the following st
 ```json
 {
   "subreddits": ["lebanon", "beirut"], // List of subreddits to scrape
-  "youtube_channels": ["UC0z2zG5gW1pW5j3h0a0gDQQ"], // List of YouTube channel IDs or URLs
+  "youtube_videos": ["https://www.youtube.com/watch?v=aoUEXRlvmxc"], // List of YouTube video URLs
   "single_reddit_post": "https://old.reddit.com/r/lebanon/comments/18k7z8v/what_are_your_thoughts_on_the_current_situation/", // Optional: A single Reddit post URL
   "single_youtube_video": "https://www.youtube.com/watch?v=aoUEXRlvmxc" // Optional: A single YouTube video URL
 }
 ```
 - Add subreddits relevant to your target (e.g., `lebanon`, `beirut`).
-- Add YouTube channel IDs or URLs (e.g., `UC0z2zG5gW1pW5j3h0a0gDQQ` or `https://www.youtube.com/@channel`).
+- Add YouTube video URLs (e.g., `https://www.youtube.com/watch?v=aoUEXRlvmxc`).
 - Optionally, specify a single Reddit post or YouTube video URL to scrape.
 
 ## How to Run main.py

@@ -1,11 +1,9 @@
 import json
 import time
 import uuid
-import requests
-from bs4 import BeautifulSoup
 from youtube_comment_downloader import YoutubeCommentDownloader
 from classifier import is_relevant
-from database import init_db, is_seen, mark_seen, close_db
+from database import init_db, is_seen, mark_seen, save_comment_mapping, get_mapped_uuid, close_db
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
@@ -20,40 +18,6 @@ def save_comment(comment_data, file_path="comments.jsonl"):
     with open(file_path, "a") as f:
         json.dump(comment_data, f)
         f.write("\n")
-
-
-def get_video_ids_from_channel(channel_identifier, headers):
-    """Fetch video IDs from a YouTube channel page or ID.
-
-    Args:
-        channel_identifier (str): Channel URL or ID.
-        headers (dict): HTTP headers for requests.
-
-    Returns:
-        list: List of video URLs.
-    """
-    video_urls = []
-    if channel_identifier.startswith("http"):
-        channel_url = channel_identifier
-    else:
-        channel_url = f"https://www.youtube.com/channel/{channel_identifier}/videos"
-
-    try:
-        response = requests.get(channel_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-
-        # Find video links
-        video_links = soup.find_all("a", class_="yt-simple-endpoint style-scope ytd-grid-video-renderer")
-        for link in video_links:
-            href = link.get("href", "")
-            if href.startswith("/watch?v="):
-                video_urls.append(f"https://www.youtube.com{href}")
-
-        return video_urls[:10]  # Limit to 10 videos to avoid overloading
-    except requests.RequestException as e:
-        print(f"Error fetching channel {channel_identifier}: {e}")
-        return []
 
 
 @retry(
@@ -73,7 +37,7 @@ def fetch_comments_with_timeout(downloader, video_url, timeout=30):
     Returns:
         iterator: Comments iterator from youtube-comment-downloader.
     """
-    # youtube-comment-downloader doesn't support direct timeout, so we rely on tenacity for retries
+    print(f"Attempting to fetch comments from {video_url}")
     return downloader.get_comments_from_url(video_url)
 
 
@@ -100,31 +64,45 @@ def scrape_comments(video_url, conn, downloader):
     try:
         comments = fetch_comments_with_timeout(downloader, video_url)
         for comment in comments:
-            comment_id = comment.get("cid", str(uuid.uuid4()))
-            if is_seen(conn, "seen_comments", comment_id):
+            original_id = comment.get("cid", str(uuid.uuid4()))
+            if is_seen(conn, "seen_comments", original_id):
                 continue
 
             text = comment.get("text", "")
             author = comment.get("author", "unknown")
             is_reply = comment.get("parent", None) is not None
-            parent_id = comment.get("parent", None)
+
+            # Generate parent_id if it's a reply and parent is saved
+            parent_id = None
+            if is_reply:
+                parent_original_id = comment.get("parent", None)
+                if parent_original_id:
+                    parent_uuid = get_mapped_uuid(conn, parent_original_id)
+                    if parent_uuid and is_seen(conn, "seen_comments", parent_uuid):
+                        parent_id = parent_uuid
 
             comments_fetched += 1
 
             # Classify and save if relevant
             if text and is_relevant(text):
+                new_uuid = str(uuid.uuid4())
                 comment_data = {
-                    "id": str(uuid.uuid4()),
+                    "id": new_uuid,
                     "text": text,
                     "author": author,
                     "url": video_url,
                     "is_reply": is_reply,
-                    "parent_id": parent_id if is_reply and is_seen(conn, "seen_comments", parent_id) else None
+                    "parent_id": parent_id
                 }
                 save_comment(comment_data)
+                mark_seen(conn, "seen_comments", new_uuid)
+                save_comment_mapping(conn, original_id, new_uuid)
                 comments_saved += 1
+                print(f"Saved comment: {text[:20]}... (id: {new_uuid})")
+            else:
+                mark_seen(conn, "seen_comments", original_id)
+                save_comment_mapping(conn, original_id, original_id)  # Map even if not saved
 
-            mark_seen(conn, "seen_comments", comment_id)
             time.sleep(1)  # Rate limiting
 
         # Mark video as seen
@@ -132,7 +110,6 @@ def scrape_comments(video_url, conn, downloader):
 
     except Exception as e:
         print(f"Failed to fetch comments for {video_url} after retries: {e}")
-        # Skip this video and continue with the next
         return comments_fetched, comments_saved
 
     print(f"Comments fetched: {comments_fetched}, Relevant comments saved: {comments_saved}")
@@ -140,11 +117,9 @@ def scrape_comments(video_url, conn, downloader):
 
 
 def crawl_youtube():
-    """Main function to crawl YouTube comments."""
     config = load_config()
-    youtube_channels = config.get("youtube_channels", [])
+    youtube_videos = config.get("youtube_videos", [])
     single_video = config.get("single_youtube_video", "")
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     downloader = YoutubeCommentDownloader()
 
     conn = init_db()
@@ -154,19 +129,18 @@ def crawl_youtube():
     try:
         # Process single video if provided
         if single_video:
+            print(f"Processing single video: {single_video}")
             fetched, saved = scrape_comments(single_video, conn, downloader)
             total_fetched += fetched
             total_saved += saved
 
-        # Process channels
-        for channel in youtube_channels:
-            print(f"Processing channel: {channel}")
-            video_urls = get_video_ids_from_channel(channel, headers)
-            for video_url in video_urls:
-                fetched, saved = scrape_comments(video_url, conn, downloader)
-                total_fetched += fetched
-                total_saved += saved
-                time.sleep(2)  # Rate limiting between videos
+        # Process list of videos
+        for video_url in youtube_videos:
+            print(f"Processing video: {video_url}")
+            fetched, saved = scrape_comments(video_url, conn, downloader)
+            total_fetched += fetched
+            total_saved += saved
+            time.sleep(2)  # Rate limiting between videos
 
     except Exception as e:
         print(f"Error in crawl_youtube: {e}")

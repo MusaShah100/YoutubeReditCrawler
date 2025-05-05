@@ -4,7 +4,7 @@ import uuid
 import requests
 from bs4 import BeautifulSoup
 from classifier import is_relevant
-from database import init_db, is_seen, mark_seen, close_db
+from database import init_db, is_seen, mark_seen, save_comment_mapping, get_mapped_uuid, close_db
 
 def load_config(file_path="sample.json"):
     with open(file_path, "r") as f:
@@ -39,8 +39,8 @@ def scrape_comments(post_url, conn, headers):
         # Process comments
         comments = comment_area.find_all("div", class_="entry", recursive=True)
         for comment in comments:
-            comment_id = comment.get("data-fullname", str(uuid.uuid4()))
-            if is_seen(conn, "seen_comments", comment_id):
+            original_id = comment.get("data-fullname", str(uuid.uuid4()))
+            if is_seen(conn, "seen_comments", original_id):
                 continue
 
             # Extract comment text
@@ -59,14 +59,19 @@ def scrape_comments(post_url, conn, headers):
             parent_id = None
             if is_reply:
                 parent_comment = comment.find_parent("div", class_="comment")
-                parent_id = parent_comment.get("data-fullname", None) if parent_comment else None
+                parent_original_id = parent_comment.get("data-fullname", None) if parent_comment else None
+                if parent_original_id:
+                    parent_uuid = get_mapped_uuid(conn, parent_original_id)
+                    if parent_uuid and is_seen(conn, "seen_comments", parent_uuid):
+                        parent_id = parent_uuid
 
             comments_fetched += 1
 
             # Classify and save if relevant
             if text and is_relevant(text):
+                new_uuid = str(uuid.uuid4())
                 comment_data = {
-                    "id": str(uuid.uuid4()),
+                    "id": new_uuid,
                     "text": text,
                     "author": author,
                     "url": post_url,
@@ -74,9 +79,13 @@ def scrape_comments(post_url, conn, headers):
                     "parent_id": parent_id
                 }
                 save_comment(comment_data)
+                mark_seen(conn, "seen_comments", new_uuid)
+                save_comment_mapping(conn, original_id, new_uuid)
                 comments_saved += 1
+            else:
+                mark_seen(conn, "seen_comments", original_id)
+                save_comment_mapping(conn, original_id, original_id)  # Map even if not saved
 
-            mark_seen(conn, "seen_comments", comment_id)
             time.sleep(1)  # Rate limiting
 
         # Mark post as seen
